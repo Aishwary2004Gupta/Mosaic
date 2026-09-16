@@ -2,79 +2,122 @@ import pygame
 import sys
 import math
 import random
-from PIL import Image
-import urllib.request
 import io
+import urllib.request
+from PIL import Image
+from collections import defaultdict
 
 # --- Constants ---
 WIDTH, HEIGHT = 700, 700
-GRAVITY = pygame.math.Vector2(0, 0)          # no gravity → balls spread across canvas
 BACKGROUND_COLOR = (0, 0, 0)
-BOUNCE_LOSS = 0.9
-COLLISION_DAMPING = 0.95
-MIN_RADIUS = 10
-MAX_RADIUS = 27
-SPAWN_STEP_INTERVAL = 1
-FIXED_DT = 1 / 60.0
-TOTAL_STEPS = 400
-SIMULATION_SUBSTEPS = 8
-MAX_OBJECTS = 380
-
-# Live image from Unsplash — fetched every run, never saved to disk
-IMAGE_URL = "https://images.unsplash.com/photo-1564514476902-542f8c30121e?w=700&q=80"
+DAMPING = 0.93
+MIN_RADIUS = 3
+MAX_RADIUS = 7
+MAX_OBJECTS = 4500
+POPS_PER_FRAME = 40
+STIFFNESS = 0.07
+POP_SPEED = 0.09
+IMAGE_URL = "https://images.unsplash.com/photo-1564514476902-542f8c30121e?auto=format&fit=crop&w=700&h=700&q=80"
 
 
 class Ball:
-    def __init__(self, position, radius, step_added, color=None):
-        self.position = pygame.math.Vector2(position)
-        self.old_position = pygame.math.Vector2(position)
-        self.acceleration = pygame.math.Vector2(0, 0)
-        self.radius = radius
-        self.mass = math.pi * radius ** 2
-        self.step_added = step_added
-        self.color = color if color else (
-            random.randint(100, 255),
-            random.randint(100, 255),
-            random.randint(100, 255),
-        )
+    __slots__ = ['x', 'y', 'tx', 'ty', 'r', 'cr', 'cg', 'cb',
+                 'vx', 'vy', 'pop', 'pop_t', 'settled']
 
-    def update(self, dt):
-        velocity = self.position - self.old_position
-        self.old_position = pygame.math.Vector2(self.position)
-        self.position += velocity + self.acceleration * dt * dt
-        self.acceleration = pygame.math.Vector2(0, 0)
+    def __init__(self, tx, ty, r, cr, cg, cb):
+        side = random.randint(0, 3)
+        if side == 0:   self.x, self.y = random.uniform(0, WIDTH), -40.0
+        elif side == 1: self.x, self.y = random.uniform(0, WIDTH), HEIGHT + 40.0
+        elif side == 2: self.x, self.y = -40.0, random.uniform(0, HEIGHT)
+        else:           self.x, self.y = WIDTH + 40.0, random.uniform(0, HEIGHT)
 
-    def apply_constraints(self):
-        if self.position.x - self.radius < 0:
-            self.position.x = self.radius
-        elif self.position.x + self.radius > WIDTH:
-            self.position.x = WIDTH - self.radius
-        if self.position.y - self.radius < 0:
-            self.position.y = self.radius
-        elif self.position.y + self.radius > HEIGHT:
-            self.position.y = HEIGHT - self.radius
+        self.tx, self.ty = float(tx), float(ty)
+        self.r = float(r)
+        self.cr, self.cg, self.cb = cr, cg, cb
+        self.vx = random.uniform(-2, 2)
+        self.vy = random.uniform(-2, 2)
+        self.pop = False
+        self.pop_t = 0.0
+        self.settled = False
 
-    def draw(self, screen):
-        draw_pos = (int(self.position.x), int(self.position.y))
-        pygame.draw.circle(screen, self.color, draw_pos, int(self.radius))
+    def update(self):
+        if not self.pop:
+            return
+
+        if self.pop_t < 1.0:
+            self.pop_t = min(1.0, self.pop_t + POP_SPEED)
+
+        if self.settled:
+            return
+
+        dx = self.tx - self.x
+        dy = self.ty - self.y
+        dist_sq = dx * dx + dy * dy
+
+        if dist_sq < 0.64:
+            self.x, self.y = self.tx, self.ty
+            self.vx, self.vy = 0.0, 0.0
+            self.settled = True
+            return
+
+        self.vx = (self.vx + dx * STIFFNESS) * DAMPING
+        self.vy = (self.vy + dy * STIFFNESS) * DAMPING
+        self.x += self.vx
+        self.y += self.vy
+
+
+class SpatialGrid:
+    __slots__ = ['cell_size', 'cells']
+
+    def __init__(self, cell_size=20):
+        self.cell_size = cell_size
+        self.cells = defaultdict(list)
+
+    def clear(self):
+        self.cells.clear()
+
+    def insert(self, idx, x, y):
+        gx = int(x // self.cell_size)
+        gy = int(y // self.cell_size)
+        self.cells[(gx, gy)].append(idx)
+
+    def get_nearby(self, x, y):
+        gx = int(x // self.cell_size)
+        gy = int(y // self.cell_size)
+        result = []
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                key = (gx + dx, gy + dy)
+                if key in self.cells:
+                    result.extend(self.cells[key])
+        return result
 
 
 class Simulation:
     def __init__(self):
         pygame.init()
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        pygame.display.set_caption("Circle Mosaic — Live Image")
-        self.balls = []
-        self.font = pygame.font.Font(None, 30)
-        self.current_step = 0
+        pygame.display.set_caption("Circle Mosaic")
         self.clock = pygame.time.Clock()
-        self.input_image = None
-        random.seed(42)
-        self.load_image()
+        self.font = pygame.font.Font(None, 24)
+        self.small_font = pygame.font.Font(None, 20)
+        self.balls = []
+        self.image = None
+        self.image_data = None
+        self.grid = SpatialGrid(cell_size=18)
+        self.targets = []
+        self.pop_index = 0
+        self.all_popped = False
+        self.frame = 0
 
-    # ---- fetch image from URL every run (real-time, no local file) ----
-    def load_image(self):
-        print("Fetching image from Unsplash...")
+        # Pre-create surfaces for fast blitting
+        self.ball_surfs = {}
+        self.bg_surface = pygame.Surface((WIDTH, HEIGHT))
+
+        self.fetch_image()
+
+    def fetch_image(self):
+        print("Fetching image...")
         try:
             req = urllib.request.Request(IMAGE_URL, headers={
                 "User-Agent": "Mozilla/5.0",
@@ -82,157 +125,185 @@ class Simulation:
             })
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = resp.read()
-            self.input_image = Image.open(io.BytesIO(data)).convert("RGB")
-            self.input_image = self.input_image.resize((WIDTH, HEIGHT))
-            print("Image loaded successfully!")
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+            self.image = img.resize((WIDTH, HEIGHT))
+            self.image_data = self.image.load()
+            print(f"Image loaded: {self.image.size}")
         except Exception as e:
-            print(f"Could not fetch image: {e}")
-            print("Balls will keep random colours.")
+            print(f"Failed: {e}")
+            self.create_fallback()
 
-    def add_ball(self, ball):
-        if len(self.balls) < MAX_OBJECTS:
-            self.balls.append(ball)
-        elif self.balls:
-            self.balls.pop(0)
-            self.balls.append(ball)
+    def create_fallback(self):
+        self.image = Image.new("RGB", (WIDTH, HEIGHT))
+        pixels = self.image.load()
+        for y in range(HEIGHT):
+            for x in range(WIDTH):
+                r = int(128 + 127 * math.sin(x / 80))
+                g = int(128 + 127 * math.sin(y / 80))
+                b = int(128 + 127 * math.sin((x + y) / 80))
+                pixels[x, y] = (r, g, b)
+        self.image_data = pixels
 
-    # ---- KEY FIX: actually set ball.color from the image ----
-    def update_colors_from_image(self):
-        """Every ball picks the image colour at its current pixel."""
-        if not self.input_image:
-            return
-        for ball in self.balls:
-            x = min(max(int(ball.position.x), 0), WIDTH - 1)
-            y = min(max(int(ball.position.y), 0), HEIGHT - 1)
-            r, g, b = self.input_image.getpixel((x, y))
-            ball.color = (int(r), int(g), int(b))
+    def build_targets(self):
+        self.targets = []
+        grid_size = max(5, int(math.sqrt((WIDTH * HEIGHT) / MAX_OBJECTS)))
+
+        for y in range(grid_size // 2, HEIGHT, grid_size):
+            for x in range(grid_size // 2, WIDTH, grid_size):
+                ix = min(x, WIDTH - 1)
+                iy = min(y, HEIGHT - 1)
+                cr, cg, cb = self.image_data[ix, iy]
+                r = random.uniform(MIN_RADIUS, MAX_RADIUS)
+                jx = x + random.uniform(-1, 1)
+                jy = y + random.uniform(-1, 1)
+                self.targets.append((jx, jy, r, cr, cg, cb))
+
+        random.shuffle(self.targets)
+        print(f"Targets: {len(self.targets)}")
 
     def solve_collisions(self):
-        num_balls = len(self.balls)
-        for i in range(num_balls):
-            for j in range(i + 1, num_balls):
-                a = self.balls[i]
+        self.grid.clear()
+        for i, b in enumerate(self.balls):
+            if b.pop_t >= 1.0:
+                self.grid.insert(i, b.x, b.y)
+
+        for i, a in enumerate(self.balls):
+            if a.pop_t < 1.0:
+                continue
+
+            nearby = self.grid.get_nearby(a.x, a.y)
+            ar = a.r * (0.5 + 0.5 * min(a.pop_t, 1.0))
+
+            for j in nearby:
+                if j <= i:
+                    continue
                 b = self.balls[j]
-                dx = a.position.x - b.position.x
-                dy = a.position.y - b.position.y
-                dist_sq = dx * dx + dy * dy
-                min_dist = a.radius + b.radius
-                if dist_sq < min_dist * min_dist and dist_sq > 0:
-                    dist = math.sqrt(dist_sq)
-                    nx, ny = dx / dist, dy / dist
-                    overlap = (min_dist - dist) * 0.5
-                    total_mass = a.mass + b.mass
-                    if total_mass == 0:
-                        r1 = r2 = 0.5
-                    else:
-                        r1 = b.mass / total_mass
-                        r2 = a.mass / total_mass
-                    sep_x = nx * overlap * COLLISION_DAMPING
-                    sep_y = ny * overlap * COLLISION_DAMPING
-                    a.position.x += sep_x * r1
-                    a.position.y += sep_y * r1
-                    b.position.x -= sep_x * r2
-                    b.position.y -= sep_y * r2
+                dx = a.x - b.x
+                dy = a.y - b.y
+                d2 = dx * dx + dy * dy
+                br = b.r * (0.5 + 0.5 * min(b.pop_t, 1.0))
+                md = ar + br
 
-    def update(self, dt):
-        sub_dt = dt / SIMULATION_SUBSTEPS
-        for _ in range(SIMULATION_SUBSTEPS):
-            for ball in self.balls:
-                ball.acceleration += GRAVITY
-            self.solve_collisions()
-            for ball in self.balls:
-                ball.apply_constraints()
-            for ball in self.balls:
-                ball.update(sub_dt)
+                if d2 < md * md and d2 > 0.001:
+                    d = math.sqrt(d2)
+                    nx, ny = dx / d, dy / d
+                    overlap = (md - d) * 0.5
+                    sep_x = nx * overlap * 0.85
+                    sep_y = ny * overlap * 0.85
+                    a.x += sep_x
+                    a.y += sep_y
+                    b.x -= sep_x
+                    b.y -= sep_y
 
-    def avg_speed(self):
-        if not self.balls:
-            return 0
-        total = 0.0
-        for ball in self.balls:
-            vx = ball.position.x - ball.old_position.x
-            vy = ball.position.y - ball.old_position.y
-            total += abs(vx) + abs(vy)
-        return total / len(self.balls)
+    def pop_batch(self):
+        for _ in range(POPS_PER_FRAME):
+            if self.pop_index >= len(self.targets):
+                self.all_popped = True
+                return
 
-    def draw(self, label=""):
-        self.screen.fill(BACKGROUND_COLOR)
-        for ball in self.balls:
-            ball.draw(self.screen)
-        info = f"Step {self.current_step}/{TOTAL_STEPS}  |  {len(self.balls)}/{MAX_OBJECTS} circles"
-        if label:
-            info += f"  |  {label}"
-        text = self.font.render(info, True, (200, 200, 200))
-        self.screen.blit(text, (10, 10))
-        pygame.display.flip()
+            tx, ty, r, cr, cg, cb = self.targets[self.pop_index]
+            ball = Ball(tx, ty, r, cr, cg, cb)
+            ball.pop = True
+            self.balls.append(ball)
+            self.pop_index += 1
 
-    # ------------------------------------------------------------------ #
+    def get_ball_surface(self, radius, color, pop_t):
+        key = (int(radius), color, int(pop_t * 10))
+        if key in self.ball_surfs:
+            return self.ball_surfs[key]
+
+        r = max(1, int(radius * (0.5 + 0.5 * min(pop_t, 1.0))))
+        size = r * 2 + 4
+        if size > 60:
+            return None
+
+        surf = pygame.Surface((size, size), pygame.SRCALPHA)
+        cx, cy = size // 2, size // 2
+        pygame.draw.circle(surf, (*color, 255), (cx, cy), r)
+        if r > 2:
+            highlight = (
+                min(255, color[0] + 40),
+                min(255, color[1] + 40),
+                min(255, color[2] + 40),
+                180,
+            )
+            pygame.draw.circle(surf, highlight, (cx, cy), max(1, r // 3))
+
+        if len(self.ball_surfs) < 5000:
+            self.ball_surfs[key] = surf
+        return surf
+
     def run(self):
         running = True
-        balls_spawned = 0
-        phase = "SPAWN"          # SPAWN → SETTLE → MAP → DONE
-        settle_wait = 0
-
         while running:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        running = False
+                    if event.key == pygame.K_SPACE:
+                        global POPS_PER_FRAME
+                        POPS_PER_FRAME = min(200, POPS_PER_FRAME + 20)
 
+            if not self.all_popped:
+                if self.frame == 0:
+                    self.build_targets()
+                self.pop_batch()
+
+            for ball in self.balls:
+                ball.update()
+
+            if self.frame % 3 == 0:
+                self.solve_collisions()
+
+            self.draw()
             self.clock.tick(60)
-
-            # ---- SPAWN: blast balls outward from centre ----
-            if phase == "SPAWN":
-                if (self.current_step % SPAWN_STEP_INTERVAL == 0
-                        and balls_spawned < MAX_OBJECTS):
-                    cx, cy = WIDTH / 2, HEIGHT / 2
-                    radius = random.uniform(MIN_RADIUS, MAX_RADIUS)
-                    new_ball = Ball((cx, cy), radius, self.current_step)
-                    angle = random.uniform(0, 2 * math.pi)
-                    blast = 280
-                    new_ball.old_position.x = cx - math.cos(angle) * blast * FIXED_DT
-                    new_ball.old_position.y = cy - math.sin(angle) * blast * FIXED_DT
-                    self.add_ball(new_ball)
-                    balls_spawned += 1
-
-                if balls_spawned >= MAX_OBJECTS:
-                    phase = "SETTLE"
-
-            # ---- SETTLE: wait for balls to slow down ----
-            elif phase == "SETTLE":
-                settle_wait += 1
-                if (self.avg_speed() < 0.5 and settle_wait > 60) or settle_wait > 300:
-                    phase = "MAP"
-
-            # ---- MAP: paint image colours onto every ball ----
-            elif phase == "MAP":
-                self.update_colors_from_image()
-                phase = "DONE"
-
-            # ---- physics step ----
-            if phase in ("SPAWN", "SETTLE"):
-                self.update(FIXED_DT)
-
-            # ---- continuous colour update while settling ----
-            if self.input_image and phase in ("SPAWN", "SETTLE"):
-                if self.current_step % 2 == 0:
-                    self.update_colors_from_image()
-
-            # ---- draw ----
-            self.draw(label=phase.capitalize())
-            self.current_step += 1
-
-            # ---- once DONE, keep showing result until user closes ----
-            if phase == "DONE":
-                while running:
-                    for event in pygame.event.get():
-                        if event.type == pygame.QUIT:
-                            running = False
-                    self.clock.tick(30)
+            self.frame += 1
 
         pygame.quit()
         sys.exit()
 
+    def draw(self):
+        self.bg_surface.fill(BACKGROUND_COLOR)
+        self.screen.blit(self.bg_surface, (0, 0))
+
+        for ball in self.balls:
+            if ball.pop_t <= 0:
+                continue
+            surf = self.get_ball_surface(ball.r, (ball.cr, ball.cg, ball.cb), ball.pop_t)
+            r = max(1, int(ball.r * (0.5 + 0.5 * min(ball.pop_t, 1.0))))
+
+            if surf:
+                x = int(ball.x) - surf.get_width() // 2
+                y = int(ball.y) - surf.get_height() // 2
+                self.screen.blit(surf, (x, y))
+            else:
+                pygame.draw.circle(
+                    self.screen,
+                    (ball.cr, ball.cg, ball.cb),
+                    (int(ball.x), int(ball.y)),
+                    r
+                )
+
+        settled = sum(1 for b in self.balls if b.settled)
+        pct = int(self.pop_index / max(1, len(self.targets)) * 100)
+
+        hud_lines = [
+            f"Circles: {len(self.balls)}/{len(self.targets)}  ({pct}%)",
+            f"Settled: {settled}  |  Speed: {POPS_PER_FRAME}/frame",
+            "SPACE = faster  |  ESC = quit",
+        ]
+        for i, line in enumerate(hud_lines):
+            text = self.small_font.render(line, True, (180, 180, 180))
+            self.screen.blit(text, (10, 10 + i * 18))
+
+        fps_text = self.small_font.render(f"FPS: {int(self.clock.get_fps())}", True, (120, 120, 120))
+        self.screen.blit(fps_text, (WIDTH - 90, 10))
+
+        pygame.display.flip()
+
 
 if __name__ == "__main__":
-    simulation = Simulation()
-    simulation.run()
+    sim = Simulation()
+    sim.run()
