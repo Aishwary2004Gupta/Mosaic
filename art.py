@@ -21,7 +21,7 @@ SIMULATION_SUBSTEPS = 8
 MAX_OBJECTS = 380
 
 # Live image from Unsplash — fetched every run, never saved to disk
-IMAGE_URL = "https://plus.unsplash.com/premium_photo-1724637400032-6d804df06497"
+IMAGE_URL = "https://raw.githubusercontent.com/Aishwary2004Gupta/models/cloud/images/ufo.png"
 
 
 class Ball:
@@ -74,7 +74,7 @@ class Simulation:
 
     # ---- fetch image from URL every run (real-time, no local file) ----
     def load_image(self):
-        print("Fetching image from Unsplash...")
+        print("Fetching image...")
         try:
             req = urllib.request.Request(IMAGE_URL, headers={
                 "User-Agent": "Mozilla/5.0",
