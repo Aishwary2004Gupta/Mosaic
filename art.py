@@ -21,7 +21,7 @@ SIMULATION_SUBSTEPS = 8
 MAX_OBJECTS = 380
 
 # Live image from Unsplash — fetched every run, never saved to disk
-IMAGE_URL = "https://images.unsplash.com/photo-1564514476902-542f8c30121e?w=700&q=80"
+IMAGE_URL = "https://plus.unsplash.com/premium_photo-1724637400032-6d804df06497"
 
 
 class Ball:
