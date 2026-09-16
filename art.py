@@ -21,7 +21,7 @@ SIMULATION_SUBSTEPS = 8
 MAX_OBJECTS = 380
 
 # Live image from Unsplash — fetched every run, never saved to disk
-IMAGE_URL = "https://static.vecteezy.com/system/resources/previews/026/740/648/non_2x/of-a-blue-morpho-butterfly-on-white-background-generative-ai-photo.jpg"
+IMAGE_URL = "https://raw.githubusercontent.com/Aishwary2004Gupta/models/cloud/images/flower_bouquet.png"
 
 
 class Ball:
